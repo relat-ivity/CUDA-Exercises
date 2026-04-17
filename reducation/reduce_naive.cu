@@ -12,47 +12,51 @@ do { \
     } \
 } while(0)
 
-__global__ void reduceUnrolling8(float *g_idata, float *g_odata, int n) {
+__global__ void reduce(const float *input, float *output, int n) {
+    __shared__ float idata[BLOCK_SIZE]; 
     unsigned tid = threadIdx.x;
     unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float *idata = g_idata + blockIdx.x * blockDim.x;
-    if (idx >= n) 
-        return;
+    idata[tid] = (idx < n) ? input[idx] : 0.0f;
+    __syncthreads();
+
     for (int i = 1; i < blockDim.x; i *= 2) {
         int index = 2 * i * tid;
-        if (index < blockDim.x) {
+        if (index + i < blockDim.x) {
             idata[index] += idata[index + i]; 
         }
         __syncthreads();
     }
-    if (tid == 0)
-        g_odata[blockIdx.x] = idata[0];
+    if (tid == 0) { 
+        atomicAdd(output, idata[0]);
+    }
 }
 
-
+// input, output are device pointers
 extern "C" void solve(const float* input, float* output, int N) {
-    int block_size = BLOCK_SIZE;
-    int grid_size = (N - 1) / block_size + 1;
-    dim3 block(block_size, 1);
-    dim3 grid(grid_size, 1);
+    int grid_size = (N - 1) / BLOCK_SIZE + 1;
+    reduce<<<grid_size, BLOCK_SIZE>>>(input, output, N);
+}
 
-    float *idata_dev = NULL;
-    float *odata_dev = NULL;
-    CHECK_CUDA(cudaMalloc(&idata_dev, N * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&odata_dev, grid_size * sizeof(float)));
+int main() {
+    const int N = 8;
+    float h_input[N] = {1, 2, 3, 4, 5, 6, 7, 8};
+    float h_output = 0.0f;
 
-    CHECK_CUDA(cudaMemcpy(idata_dev, input, N * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaDeviceSynchronize());
-    reduceUnrolling8<<<grid.x, block.x>>>(idata_dev, odata_dev, N);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    *output = 0;
-    float *result = (float*)malloc(grid_size * sizeof(float));
-    CHECK_CUDA(cudaMemcpy(result, odata_dev, grid_size * sizeof(float), cudaMemcpyDeviceToHost));
-    for(int i = 0; i < grid_size; i++) 
-        *output += result[i];
-    
-    CHECK_CUDA(cudaFree(idata_dev));
-    CHECK_CUDA(cudaFree(odata_dev));
-    free(result);
-    cout<<output<<endl;
+    float *d_input = NULL;
+    float *d_output = NULL;
+
+    CHECK_CUDA(cudaMalloc((void**)&d_input, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc((void**)&d_output, sizeof(float)));
+
+    CHECK_CUDA(cudaMemcpy(d_input, h_input, N * sizeof(float), cudaMemcpyHostToDevice));
+
+    solve(d_input, d_output, N);
+
+    CHECK_CUDA(cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost));
+
+    printf("result = %f\n", h_output);
+
+    CHECK_CUDA(cudaFree(d_input));
+    CHECK_CUDA(cudaFree(d_output));
+    return 0;
 }
